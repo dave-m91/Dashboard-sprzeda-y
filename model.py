@@ -158,7 +158,10 @@ class TrendPredictor:
             ranking_df = ranking_df.sort_values(by="velocity_pct", ascending=False)
         return ranking_df
 
-    def generate_batch_ranking_fast(self, windows_week: int=12, min_sales: int=10):
+    def generate_batch_ranking_fast(self, windows_week: int=12, min_sales: int=10, min_active_weeks: int=4):
+        """
+        Przyśpieszona wersja rankingu, wykorzystująca wektoryzację
+        """
         max_date = self.data["date"].max()
         start_date = max_date - pd.Timedelta(weeks=windows_week)
 
@@ -171,7 +174,37 @@ class TrendPredictor:
         min_date = df_weekly["date"].min()
         df_weekly["x"] = (df_weekly["date"] - min_date).dt.days /7
 
-        df_weekly["xy"] = df_weekly["x"] * df_weekly["sales"]
+
+        def calculate_slope_vectorized(df_subset):
+            """
+            Przelicznie nachylenia wektorowo,
+            aby dodać do rankingu
+            """
+            df_work = df_subset.copy()
+            df_work["xy"] = df_work["x"] * df_work["sales"]
+            df_work["xx"] = df_work["x"]**2
+
+            stats = df_work.groupby("index_id").agg(
+                n=("sales", "count"),
+                sum_x=("x", "sum"),
+                sum_y=("sales", "sum"),
+                sum_xy=("xy", "sum"),
+                sum_xx=("xx", "sum"),
+                total_sales=("sales", "sum")
+            )
+
+            #wzór n * sum(x^2) - (sum(x))^2
+            denominator = (stats["n"] * stats["sum_xx"] - stats["sum_x"]**2)
+            numerator = (stats["n"] * stats["sum_xy"] - stats["sum_x"] * stats["sum_y"])
+
+            stats["slope"] = np.where(
+                denominator != 0,
+                numerator / denominator,
+                0.0
+            )
+            return stats
+
+        """df_weekly["xy"] = df_weekly["x"] * df_weekly["sales"]
         df_weekly["xx"] = df_weekly["x"] **2
 
         stats = df_weekly.groupby("index_id").agg(
@@ -201,9 +234,43 @@ class TrendPredictor:
             avg_sales > 0,
             stats["slope"] / avg_sales,
             0.0
-        )
+        )"""
 
+        main_stats = calculate_slope_vectorized(df_weekly)
+        midpoint_date = start_date + (max_date - start_date) / 2
+        df_past = df_weekly[df_weekly["date"] <= midpoint_date]
+        df_curr = df_weekly[df_weekly["date"] > midpoint_date]
+
+        stats_past = calculate_slope_vectorized(df_past)[["slope"]].rename(columns={"slope": "slope_past"})
+        stats_curr = calculate_slope_vectorized(df_curr)[["slope"]].rename(columns={"slope": "slope_curr"})
+
+        result = main_stats.join(stats_past, how="left").join(stats_curr, how="left")
+        result = result.fillna(0)
+
+        result["momentum_val"] = result["slope_curr"] - result["slope_past"]
+
+        conditions =[
+            result["momentum_val"] > 0.05,
+            result["momentum_val"] < -0.05
+        ]
+
+        choices = ["Przyspiesza 🚀", "Zwalnia 🔻"]
+        result["trend_status"] = np.select(conditions, choices, default="Stabilny ➡️")
+        result = result[result["total_sales"] >= min_sales]
+
+        check_date = max_date - pd.Timedelta(weeks=3)
+        active_ids = df_filtered[df_filtered["date"] > check_date]["index_id"].unique()
+        result = result[result.index.isin(active_ids)]
+        result = result[result["n"] >=min_active_weeks]
+
+        #uproszczone velocity liczone slope / średnia sprzedaż = % wzrostu
+        avg_sales = result["total_sales"] / result["n"]
+        result["velocity_proxy"] = np.where(
+            avg_sales > 0,
+            result["slope"] / avg_sales,
+            0.0
+        )
         
-        result = stats[["total_sales","slope", "velocity_proxy"]].reset_index()
-        result = result.sort_values(by="velocity_proxy", ascending=False)
-        return result
+        final_df = result[["total_sales","slope", "velocity_proxy", "trend_status"]].reset_index()
+        final_df = final_df.sort_values(by="velocity_proxy", ascending=False)
+        return final_df

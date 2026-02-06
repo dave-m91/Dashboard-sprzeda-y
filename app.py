@@ -86,6 +86,7 @@ with tab1:
                 "slope": st.column_config.NumberColumn(
                     "Trend (szt/tydz)", format="%.2f"
                 ),
+                "trend_status": st.column_config.TextColumn("Momentum"),
             },
             width="stretch",
             hide_index=True
