@@ -15,6 +15,7 @@ st.set_page_config(page_title="Analiza Trendów Sprzedaży", layout="wide")
 
 try:
     df = load_data()
+    df=df[["date", "sales", "Segment", "Grupa L2", "Producent"]]
     predictor = TrendPredictor(df)
 except Exception as e:
     st.error(f"Błąd wczytywania danych: {e}")
